@@ -31,6 +31,7 @@ fastify
       },
       startRedirectPath: "/auth/login",
       callbackUri: `${fastify.config.BASE_URL}/auth/callback`,
+      scope: ["user-read-private", "user-read-recently-played"],
     });
   })
   .after(() => {
