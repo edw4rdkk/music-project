@@ -4,7 +4,7 @@ const mongoose = require("mongoose");
 const fetch = require("node-fetch");
 const models = require("./models");
 const User = models.User;
-const { createOrUpdateUser } = require("./services/userService");
+const { findOneAndUpdateUser } = require("./services/userService");
 
 const schema = {
   type: "object",
@@ -94,7 +94,7 @@ async function start() {
     const profile = await profileRes.json();
     fastify.log.info({ profile }, "Spotify profile");
 
-    const user = await createOrUpdateUser(profile, token);
+    const user = await findOneAndUpdateUser(profile, token);
     fastify.log.info({ user }, "Upserted user");
 
     return reply.send({ token, user });
