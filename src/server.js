@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const fetch = require("node-fetch");
 const models = require("./models");
 const User = models.User;
+const { createOrUpdateUser } = require("./services/userService");
 
 const schema = {
   type: "object",
@@ -62,7 +63,6 @@ async function start() {
     } catch (err) {
       fastify.log.error(err);
       reply.status(500).send({ error: "failed to test database" });
-      process.exit(1);
     }
   });
 
@@ -94,16 +94,7 @@ async function start() {
     const profile = await profileRes.json();
     fastify.log.info({ profile }, "Spotify profile");
 
-    const user = await User.findOneAndUpdate(
-      { spotifyId: profile.id },
-      {
-        spotifyId: profile.id,
-        displayName: profile.display_name,
-        accessToken: token.access_token,
-        refreshToken: token.refresh_token,
-      },
-      { upsert: true, new: true }
-    );
+    const user = await createOrUpdateUser(profile, token);
     fastify.log.info({ user }, "Upserted user");
 
     return reply.send({ token, user });
