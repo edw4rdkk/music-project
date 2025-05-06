@@ -1,4 +1,4 @@
-const models = require("./models");
+const models = require("../models");
 const User = models.User;
 
 const findOneAndUpdateUser = async (profile, token) => {
