@@ -54,7 +54,6 @@ async function start() {
         case 3:
           status = "disconnecting";
           break;
-
         default:
           status = "unknown";
           break;
@@ -91,6 +90,11 @@ async function start() {
     const profileRes = await fetch("https://api.spotify.com/v1/me", {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
+    if (!profileRes.ok) {
+      const text = await profileRes.text();
+      fastify.log.error({ status: profileRes.status, body: text });
+      throw new Error(`Spotify /me failed`);
+    }
     const profile = await profileRes.json();
     fastify.log.info({ profile }, "Spotify profile");
 
