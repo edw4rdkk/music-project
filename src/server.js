@@ -5,6 +5,7 @@ const fetch = require("node-fetch");
 const models = require("./models");
 const User = models.User;
 const { findOneAndUpdateUser } = require("./services/userService");
+const authenticate = require('./middlewares/auth')
 
 const schema = {
   type: "object",
@@ -65,6 +66,8 @@ async function start() {
     }
   });
 
+  fastify.decorate('authenticate', authenticate)
+
   fastify.register(require("@fastify/oauth2"), {
     name: "spotifyOAuth2",
     credentials: {
@@ -105,6 +108,17 @@ async function start() {
   });
 
   fastify.get("/", async () => ({ hello: "world" }));
+
+  fastify.get(
+    "/api/profile",
+    {
+      preHandler: fastify.authenticate
+    },
+    async (request, reply) => {
+      const { spotifyId, displayName, createdAt } = request.user;
+      return { spotifyId, displayName, createdAt };
+    }
+  );
 
   const port = Number(fastify.config.PORT);
   await fastify.listen({ port, host: "127.0.0.1" });
