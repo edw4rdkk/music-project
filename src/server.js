@@ -5,7 +5,8 @@ const fetch = require("node-fetch");
 const models = require("./models");
 const User = models.User;
 const { findOneAndUpdateUser } = require("./services/userService");
-const authenticate = require('./middlewares/auth')
+const authenticate = require('./middlewares/auth');
+const playService = require('./services/playService');
 
 const schema = {
   type: "object",
@@ -104,6 +105,8 @@ async function start() {
     const user = await findOneAndUpdateUser(profile, token);
     fastify.log.info({ user }, "Upserted user");
 
+    await playService.syncRecentPlays(user._id, token.access_token, 10);
+
     return reply.send({ token, user });
   });
 
@@ -117,6 +120,23 @@ async function start() {
     async (request, reply) => {
       const { spotifyId, displayName, createdAt } = request.user;
       return { spotifyId, displayName, createdAt };
+    }
+  );
+
+  fastify.get("/api/history",
+    {
+      preHandler: fastify.authenticate
+    },
+    async (request, reply) => {
+
+      fastify.log.info({ user: request.user }, "Entered /api/history handler");
+
+      const userId = request.user._id;
+      const history = await playService.getRecentPlays(userId, 10);
+
+      fastify.log.info({ history }, "History fetched");
+
+      return { history };
     }
   );
 
