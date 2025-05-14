@@ -9,7 +9,7 @@ const userSchema = new mongoose.Schema({
 
 const playSchema = new mongoose.Schema({
   trackId: String,
-  playedAt: { type: Date, default: Date.now },
+  playedAt: { type: Date, default: Date.now, index: true },
   user: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
 });
 
