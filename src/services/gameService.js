@@ -1,4 +1,8 @@
 const fetch = require('node-fetch');
+const {
+  incGenerator,
+  iteratorWithTimeout,
+} = require('../packages/task1/index.js');
 
 const shuffleArray = (array) => {
   for (let i = array.length - 1; i > 0; i--) {
@@ -126,7 +130,72 @@ const getAllArtistTracks = async (artistId, accessToken, fastifyLog) => {
   return uniqueTracks;
 };
 
+const getGameRoundData = async (artistId, accessToken, fastifyLog) => {
+  fastifyLog.info(
+    `[GameService - Stage 3] Getting game round data for artist: ${artistId}`,
+  );
+  const allArtistTracks = await getAllArtistTracks(
+    artistId,
+    accessToken,
+    fastifyLog,
+  );
+
+  if (!allArtistTracks || allArtistTracks.length < 1) {
+    fastifyLog.warn(
+      `[GameService - Stage 3] Not enough tracks found for artist ${artistId} to start a game round.`,
+    );
+    return null;
+  }
+
+  const trackToGuess =
+    allArtistTracks[Math.floor(Math.random() * allArtistTracks.length)];
+
+  let options = [trackToGuess.name];
+  const otherTracks = allArtistTracks.filter((t) => t.id !== trackToGuess.id);
+  shuffleArray(otherTracks);
+
+  const numberOfOptions = 4;
+  for (
+    let i = 0;
+    options.length < numberOfOptions && i < otherTracks.length;
+    i++
+  ) {
+    if (!options.includes(otherTracks[i].name)) {
+      options.push(otherTracks[i].name);
+    }
+  }
+
+  if (options.length < numberOfOptions) {
+    fastifyLog.warn(
+      `[GameService - Stage 3] Could only form ${options.length} options for artist ${artistId}. Total unique track names might be less than ${numberOfOptions}.`,
+    );
+  }
+
+  shuffleArray(options);
+
+  fastifyLog.info(
+    `[GameService - Stage 3] Prepared round data for artist ${artistId}. Track to guess: ${trackToGuess.name}`,
+  );
+  return {
+    trackToGuess: {
+      id: trackToGuess.id,
+      name: trackToGuess.name,
+      preview_url: trackToGuess.preview_url,
+      artists: trackToGuess.artists,
+      album: trackToGuess.album,
+      popularity: trackToGuess.popularity,
+      duration_ms: trackToGuess.duration_ms,
+      explicit: trackToGuess.explicit,
+    },
+    options: options,
+    correctTrackName: trackToGuess.name,
+  };
+};
+
 module.exports = {
   getAllArtistTracks,
+  getGameRoundData,
   shuffleArray,
+  incGenerator,
+  iteratorWithTimeout,
 };
