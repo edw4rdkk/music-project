@@ -5,189 +5,206 @@ const {
 } = require('../packages/task1/index.js');
 
 const shuffleArray = (array) => {
-  for (let i = array.length - 1; i > 0; i--) {
+  const newArray = [...array];
+  for (let i = newArray.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [array[i], array[j]] = [array[j], array[i]];
+    [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
   }
-  return array;
+  return newArray;
 };
 
 const getAllArtistTracks = async (artistId, accessToken, fastifyLog) => {
   let allTracks = [];
-  let albumsUrl = `https://api.spotify.com//v1/artists/${artistId}/albums?include_groups=album,single&limit=50`;
+  let albumsUrl = `https://api.spotify.com/v1/artists/${artistId}/albums?include_groups=album,single&limit=50`;
   let page = 1;
 
   fastifyLog.info(
-    `[GameService - Stage 2] Starting to fetch all albums for artist ID: ${artistId}`,
+    `[GameService] Fetching all albums for artist ID: ${artistId}`,
   );
 
-  while (albumsUrl) {
-    fastifyLog.info(
-      `[GameService - Stage 2] Fetching album page ${page}: ${albumsUrl}`,
-    );
-    try {
+  try {
+    while (albumsUrl) {
+      fastifyLog.debug(`Fetching album page ${page}: ${albumsUrl}`);
+
       const albumsResponse = await fetch(albumsUrl, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
 
       if (!albumsResponse.ok) {
-        const errorBody = await albumsResponse.text();
+        const errorBody = await albumsResponse.json();
         fastifyLog.error(
-          `[GameService - Stage 2] Error fetching albums (page ${page}) from Spotify: ${albumsResponse.status} - ${errorBody}`,
+          `Error fetching albums page ${page}: ${albumsResponse.status}`,
+          { error: errorBody },
         );
-        throw new Error(
-          `Spotify API error fetching albums (page ${page}): ${albumsResponse.status}`,
-        );
+
+        if (albumsResponse.status === 401 || albumsResponse.status === 403) {
+          throw new Error(
+            `Spotify API authentication failed: ${albumsResponse.status}`,
+          );
+        }
+        break;
       }
 
       const albumsData = await albumsResponse.json();
       const currentAlbumItems = albumsData.items || [];
-      fastifyLog.info(
-        `[GameService - Stage 2] Fetched ${currentAlbumItems.length} album items on page ${page}.`,
+      fastifyLog.debug(
+        `Fetched ${currentAlbumItems.length} albums on page ${page}`,
       );
 
-      if (currentAlbumItems.length > 0) {
-        const albumIds = currentAlbumItems.map((album) => album.id);
-
-        for (let i = 0; i < albumIds.length; i += 20) {
-          const batchAlbumIds = albumIds.slice(i, i + 20);
-          const tracksFromAlbumsUrl = `https://api.spotify.com/?ids=${batchAlbumIds.join(',')}`;
-          fastifyLog.info(
-            `[GameService - Stage 2] Fetching tracks for album batch (IDs: ${batchAlbumIds.join(',')})`,
-          );
-
-          const tracksResponse = await fetch(tracksFromAlbumsUrl, {
-            headers: { Authorization: `Bearer ${accessToken}` },
-          });
-
-          if (!tracksResponse.ok) {
-            const errorBodyTracks = await tracksResponse.text();
-            fastifyLog.error(
-              `[GameService - Stage 2] Error fetching tracks for albums batch from Spotify: ${tracksResponse.status} - ${errorBodyTracks}`,
-            );
-            continue;
-          }
-          const tracksData = await tracksResponse.json();
-
-          if (tracksData.albums && Array.isArray(tracksData.albums)) {
-            tracksData.albums.forEach((albumWithTracks) => {
-              if (
-                albumWithTracks &&
-                albumWithTracks.tracks &&
-                albumWithTracks.tracks.items
-              ) {
-                albumWithTracks.tracks.items.forEach((track) => {
-                  const isTargetArtistPresent =
-                    track.artists &&
-                    track.artists.some((artist) => artist.id === artistId);
-
-                  if (track.preview_url && isTargetArtistPresent) {
-                    allTracks.push({
-                      id: track.id,
-                      name: track.name,
-                      preview_url: track.preview_url,
-                      popularity: track.popularity,
-                      duration_ms: track.duration_ms,
-                      explicit: track.explicit,
-                      album: {
-                        id: albumWithTracks.id,
-                        name: albumWithTracks.name,
-                        release_date: albumWithTracks.release_date,
-                        images: albumWithTracks.images,
-                      },
-                      artists: track.artists.map((a) => ({
-                        name: a.name,
-                        id: a.id,
-                      })),
-                    });
-                  }
-                });
-              }
-            });
-          }
-        }
+      if (currentAlbumItems.length === 0) {
+        albumsUrl = null;
+        continue;
       }
+
+      const albumIds = currentAlbumItems.map((album) => album.id);
+      for (let i = 0; i < albumIds.length; i += 20) {
+        const batchAlbumIds = albumIds.slice(i, i + 20);
+        const tracksUrl = `https://api.spotify.com/v1/albums?ids=${batchAlbumIds.join(',')}`;
+
+        fastifyLog.debug(`Fetching tracks for album batch: ${tracksUrl}`);
+        const tracksResponse = await fetch(tracksUrl, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+
+        if (!tracksResponse.ok) {
+          const errorBody = await tracksResponse.json();
+          fastifyLog.error(
+            `Error fetching tracks for albums batch: ${tracksResponse.status}`,
+            { error: errorBody },
+          );
+          continue;
+        }
+
+        const tracksData = await tracksResponse.json();
+        if (!Array.isArray(tracksData.albums)) {
+          fastifyLog.warn('Unexpected albums data format', {
+            data: tracksData,
+          });
+          continue;
+        }
+
+        tracksData.albums.forEach((album) => {
+          if (!album?.tracks?.items) return;
+
+          album.tracks.items.forEach((track) => {
+            if (!track?.id || !track?.artists) return;
+
+            const isTargetArtist = track.artists.some(
+              (artist) => artist.id === artistId,
+            );
+            if (!isTargetArtist) return;
+
+            allTracks.push({
+              id: track.id,
+              name: track.name,
+              uri: track.uri,
+              duration_ms: track.duration_ms || 0,
+              preview_url: track.preview_url || null,
+              popularity: track.popularity || 0,
+              explicit: track.explicit || false,
+              album: {
+                id: album.id,
+                name: album.name,
+                release_date: album.release_date,
+                images: album.images || [],
+              },
+              artists: track.artists.map((artist) => ({
+                name: artist.name,
+                id: artist.id,
+              })),
+            });
+          });
+        });
+      }
+
       albumsUrl = albumsData.next;
       page++;
-    } catch (error) {
-      fastifyLog.error(
-        `[GameService - Stage 2] Exception in getAllArtistTracks while fetching page ${page} of albums/tracks: ${error.message}`,
-      );
-      albumsUrl = null;
     }
+  } catch (error) {
+    fastifyLog.error(`Failed to fetch artist tracks: ${error.message}`, {
+      error,
+    });
+    throw error;
   }
 
-  fastifyLog.info(
-    `[GameService - Stage 2] Fetched a total of ${allTracks.length} tracks with preview_url for artist ${artistId} before deduplication.`,
-  );
+  const uniqueTracks = [
+    ...new Map(allTracks.map((track) => [track.id, track])).values(),
+  ];
 
-  const uniqueTracks = Array.from(
-    new Map(allTracks.map((track) => [track.id, track])).values(),
-  );
   fastifyLog.info(
-    `[GameService - Stage 2] Returning ${uniqueTracks.length} unique tracks for artist ${artistId}`,
+    `Fetched ${uniqueTracks.length} unique tracks for artist ${artistId}`,
   );
   return uniqueTracks;
 };
 
 const getGameRoundData = async (artistId, accessToken, fastifyLog) => {
-  fastifyLog.info(
-    `[GameService - Stage 3] Getting game round data for artist: ${artistId}`,
-  );
-  const allArtistTracks = await getAllArtistTracks(
-    artistId,
-    accessToken,
-    fastifyLog,
-  );
+  fastifyLog.info(`Preparing game round for artist: ${artistId}`);
 
-  if (!allArtistTracks || allArtistTracks.length < 1) {
-    fastifyLog.warn(
-      `[GameService - Stage 3] Not enough tracks found for artist ${artistId} to start a game round.`,
+  let allArtistTracks;
+  try {
+    allArtistTracks = await getAllArtistTracks(
+      artistId,
+      accessToken,
+      fastifyLog,
     );
+  } catch (error) {
+    fastifyLog.error(`Failed to get artist tracks: ${error.message}`);
+    throw error;
+  }
+
+  if (!allArtistTracks?.length) {
+    fastifyLog.warn(`No tracks found for artist ${artistId}`);
+    return null;
+  }
+
+  const playableTracks = allArtistTracks.filter(
+    (track) => track.duration_ms > 5000,
+  );
+  if (playableTracks.length < 1) {
+    fastifyLog.warn(`No playable tracks found for artist ${artistId}`);
     return null;
   }
 
   const trackToGuess =
-    allArtistTracks[Math.floor(Math.random() * allArtistTracks.length)];
+    playableTracks[Math.floor(Math.random() * playableTracks.length)];
+  const options = [trackToGuess.name];
 
-  let options = [trackToGuess.name];
   const otherTracks = allArtistTracks.filter((t) => t.id !== trackToGuess.id);
-  shuffleArray(otherTracks);
+  const shuffledTracks = shuffleArray(otherTracks);
 
-  const numberOfOptions = 4;
-  for (
-    let i = 0;
-    options.length < numberOfOptions && i < otherTracks.length;
-    i++
-  ) {
-    if (!options.includes(otherTracks[i].name)) {
-      options.push(otherTracks[i].name);
+  for (const track of shuffledTracks) {
+    if (options.length >= 4) break;
+    if (!options.includes(track.name)) {
+      options.push(track.name);
     }
   }
 
-  if (options.length < numberOfOptions) {
+  if (options.length < 2) {
     fastifyLog.warn(
-      `[GameService - Stage 3] Could only form ${options.length} options for artist ${artistId}. Total unique track names might be less than ${numberOfOptions}.`,
+      `Only ${options.length} options available for artist ${artistId}`,
+      { options },
     );
+    return null;
   }
 
-  shuffleArray(options);
+  fastifyLog.debug(`Prepared round for ${artistId}`, {
+    track: trackToGuess.name,
+    options: options.length,
+  });
 
-  fastifyLog.info(
-    `[GameService - Stage 3] Prepared round data for artist ${artistId}. Track to guess: ${trackToGuess.name}`,
-  );
   return {
     trackToGuess: {
       id: trackToGuess.id,
       name: trackToGuess.name,
+      uri: trackToGuess.uri,
+      duration_ms: trackToGuess.duration_ms,
       preview_url: trackToGuess.preview_url,
       artists: trackToGuess.artists,
       album: trackToGuess.album,
       popularity: trackToGuess.popularity,
-      duration_ms: trackToGuess.duration_ms,
       explicit: trackToGuess.explicit,
     },
-    options: options,
+    options: shuffleArray(options),
     correctTrackName: trackToGuess.name,
   };
 };
