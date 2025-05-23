@@ -1,14 +1,13 @@
 const fetch = require('node-fetch');
-const {
-  incGenerator,
-  iteratorWithTimeout,
-} = require('../packages/task1/index.js');
+const memoize = require('./memoize');
 
 const shuffleArray = (array) => {
   const newArray = [...array];
   for (let i = newArray.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
+    const temp = newArray[i];
+    newArray[i] = newArray[j];
+    newArray[j] = temp;
   }
   return newArray;
 };
@@ -137,60 +136,92 @@ const getAllArtistTracks = async (artistId, accessToken, fastifyLog) => {
   return uniqueTracks;
 };
 
+class DequePriorityQueue {
+  constructor() {
+    this.entries = [];
+  }
+  enqueue(item, priority = 0, timestamp = Date.now()) {
+    this.entries.push({ item, priority, timestamp });
+  }
+  dequeueHighest() {
+    if (!this.entries.length) return null;
+    let idx = 0;
+    for (let i = 1; i < this.entries.length; i++) {
+      if (this.entries[i].priority > this.entries[idx].priority) idx = i;
+    }
+    return this.entries.splice(idx, 1)[0].item;
+  }
+  dequeueLowest() {
+    if (!this.entries.length) return null;
+    let idx = 0;
+    for (let i = 1; i < this.entries.length; i++) {
+      if (this.entries[i].priority < this.entries[idx].priority) idx = i;
+    }
+    return this.entries.splice(idx, 1)[0].item;
+  }
+  dequeueOldest() {
+    if (!this.entries.length) return null;
+    let idx = 0;
+    for (let i = 1; i < this.entries.length; i++) {
+      if (this.entries[i].timestamp < this.entries[idx].timestamp) idx = i;
+    }
+    return this.entries.splice(idx, 1)[0].item;
+  }
+  dequeueNewest() {
+    if (!this.entries.length) return null;
+    let idx = 0;
+    for (let i = 1; i < this.entries.length; i++) {
+      if (this.entries[i].timestamp > this.entries[idx].timestamp) idx = i;
+    }
+    return this.entries.splice(idx, 1)[0].item;
+  }
+}
+
+const mGetAllArtistTracks = memoize(getAllArtistTracks, { maxSize: 10 });
 const getGameRoundData = async (artistId, accessToken, fastifyLog) => {
   fastifyLog.info(`Preparing game round for artist: ${artistId}`);
 
-  let allArtistTracks;
-  try {
-    allArtistTracks = await getAllArtistTracks(
-      artistId,
-      accessToken,
-      fastifyLog,
-    );
-  } catch (error) {
-    fastifyLog.error(`Failed to get artist tracks: ${error.message}`);
-    throw error;
-  }
-
-  if (!allArtistTracks?.length) {
-    fastifyLog.warn(`No tracks found for artist ${artistId}`);
-    return null;
-  }
-
-  const playableTracks = allArtistTracks.filter(
-    (track) => track.duration_ms > 5000,
+  const allTracks = await mGetAllArtistTracks(
+    artistId,
+    accessToken,
+    fastifyLog,
   );
-  if (playableTracks.length < 1) {
-    fastifyLog.warn(`No playable tracks found for artist ${artistId}`);
-    return null;
+  const playable = allTracks.filter((t) => t.duration_ms > 5000);
+  if (playable.length === 0) return null;
+
+  const trackToGuess = playable[Math.floor(Math.random() * playable.length)];
+
+  const pq = new DequePriorityQueue();
+  playable.forEach((t) => {
+    if (t.id !== trackToGuess.id) {
+      const ts = new Date(t.album.release_date).getTime();
+      pq.enqueue(t, t.popularity, ts);
+    }
+  });
+
+  const methods = shuffleArray([
+    'dequeueHighest',
+    'dequeueLowest',
+    'dequeueOldest',
+    'dequeueNewest',
+  ]);
+
+  const options = [trackToGuess.name];
+  let idx = 0;
+  while (options.length < 3 && idx < methods.length) {
+    const fn = pq[methods[idx++]].bind(pq);
+    const next = fn();
+    if (next) options.push(next.name);
   }
 
-  const trackToGuess =
-    playableTracks[Math.floor(Math.random() * playableTracks.length)];
-  const options = [trackToGuess.name];
-
-  const otherTracks = allArtistTracks.filter((t) => t.id !== trackToGuess.id);
-  const shuffledTracks = shuffleArray(otherTracks);
-
-  for (const track of shuffledTracks) {
-    if (options.length >= 4) break;
-    if (!options.includes(track.name)) {
-      options.push(track.name);
+  if (options.length < 3) {
+    const rest = shuffleArray(
+      playable.map((t) => t.name).filter((n) => !options.includes(n)),
+    );
+    while (options.length < 3 && rest.length) {
+      options.push(rest.shift());
     }
   }
-
-  if (options.length < 2) {
-    fastifyLog.warn(
-      `Only ${options.length} options available for artist ${artistId}`,
-      { options },
-    );
-    return null;
-  }
-
-  fastifyLog.debug(`Prepared round for ${artistId}`, {
-    track: trackToGuess.name,
-    options: options.length,
-  });
 
   return {
     trackToGuess: {
@@ -209,10 +240,29 @@ const getGameRoundData = async (artistId, accessToken, fastifyLog) => {
   };
 };
 
+function loggable(fn, { level = 'info' } = {}) {
+  return async function (...args) {
+    const fastifyLog = args.find((a) => a && typeof a[level] === 'function');
+    const name = fn.name || '<anonymous>';
+    const logger = fastifyLog || console;
+
+    logger[level]({ args }, `Enter ${name}`);
+    const start = Date.now();
+
+    try {
+      const result = await fn.apply(this, args);
+      const duration = Date.now() - start;
+      logger[level]({ result, duration }, `Exit ${name}`);
+      return result;
+    } catch (err) {
+      const duration = Date.now() - start;
+      logger.error({ err, duration }, `!! Error in ${name}`);
+      throw err;
+    }
+  };
+}
+
 module.exports = {
-  getAllArtistTracks,
-  getGameRoundData,
-  shuffleArray,
-  incGenerator,
-  iteratorWithTimeout,
+  getAllArtistTracks: loggable(mGetAllArtistTracks, { level: 'debug' }),
+  getGameRoundData: loggable(getGameRoundData, { level: 'info' }),
 };
