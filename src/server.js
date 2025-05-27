@@ -1,11 +1,22 @@
-// src/server.js
-const fastify = require('fastify')({ logger: true });
+const fastify = require('fastify')({
+  logger: {
+    transport: {
+      target: 'pino-pretty',
+      options: {
+        colorize: true,
+        translateTime: 'HH:MM:ss',
+        ignore: 'pid,hostname',
+        singleLine: false,
+        levelFirst: true,
+      },
+    },
+  },
+});
 const fastifyEnv = require('@fastify/env');
-const fetch = require('node-fetch');
+const fastifyCors = require('@fastify/cors');
 const models = require('./models');
-// const User = models.User;
-const { findOneAndUpdateUser } = require('./services/userService');
 const authenticate = require('./middlewares/auth');
+const { findOneAndUpdateUser } = require('./services/userService');
 const playService = require('./services/playService');
 const gameService = require('./services/gameService');
 
@@ -33,41 +44,8 @@ async function start() {
     schema,
     dotenv: true,
   });
-
-  await fastify.register(require('./plugins/mongodb.js'));
-
-  fastify.get('/test-db', async (request, reply) => {
-    try {
-      const mongoose = fastify.mongoose;
-      const connectionState = mongoose.connection.readyState;
-      let status = '';
-      switch (connectionState) {
-        case 0:
-          status = 'disconnected';
-          break;
-        case 1:
-          status = 'connected';
-          break;
-        case 2:
-          status = 'connecting';
-          break;
-        case 3:
-          status = 'disconnecting';
-          break;
-        default:
-          status = 'unknown';
-          break;
-      }
-      reply.send({ database: status });
-    } catch (err) {
-      fastify.log.error(err);
-      reply.status(500).send({ error: 'failed to test database' });
-    }
-  });
-
-  fastify.decorate('authenticate', authenticate);
-
-  fastify.register(require('@fastify/oauth2'), {
+  await fastify.register(require('./plugins/mongodb'));
+  await fastify.register(require('@fastify/oauth2'), {
     name: 'spotifyOAuth2',
     credentials: {
       client: {
@@ -89,202 +67,105 @@ async function start() {
     ],
   });
 
-  fastify.get('/auth/callback', async function (request, reply) {
-    fastify.log.info(' Hit /auth/callback');
+  await fastify.register(require('./plugins/spotify-proxy'));
+
+  await fastify.register(fastifyCors, {
+    origin: 'http://localhost:3001',
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    credentials: true,
+  });
+
+  fastify.decorate('authenticate', authenticate);
+
+  fastify.get('/test-db', async () => {
+    const states = ['disconnected', 'connected', 'connecting', 'disconnecting'];
+    return {
+      database: states[fastify.mongoose.connection.readyState] || 'unknown',
+    };
+  });
+
+  fastify.get('/auth/callback', async (request, reply) => {
     const { token } =
-      await this.spotifyOAuth2.getAccessTokenFromAuthorizationCodeFlow(request);
+      await fastify.spotifyOAuth2.getAccessTokenFromAuthorizationCodeFlow(
+        request,
+      );
     const accessToken = token.access_token;
     const refreshToken = token.refresh_token;
 
-    fastify.log.info(
-      { accessToken, refreshToken, scopes: token.scope },
-      'Token response shape',
+    const profile = await request.spotify.request(
+      'https://api.spotify.com/v1/me',
+      { tokenType: 'user', token: accessToken },
     );
-
-    const profileRes = await fetch('https://api.spotify.com/v1/me', {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-
-    if (!profileRes.ok) {
-      const text = await profileRes.text();
-      fastify.log.error(
-        { status: profileRes.status, body: text },
-        'Spotify /me request failed',
-      );
-      throw new Error(`Spotify /me failed: ${profileRes.status}`);
-    }
-    const profile = await profileRes.json();
-    fastify.log.info({ profile }, 'Spotify profile');
 
     const user = await findOneAndUpdateUser(profile, token);
-
-    if (!user || !user._id) {
-      fastify.log.error(
-        { profile, token },
-        'Failed to upsert user or user._id is missing after upsert.',
-      );
-      return reply
-        .status(500)
-        .send({ error: 'Failed to process user information.' });
+    if (!user?._id) {
+      reply.code(500);
+      return { error: 'Failed to process user' };
     }
-    fastify.log.info(
-      { userId: user._id, spotifyId: user.spotifyId },
-      'Upserted user',
-    );
+    await playService.syncRecentPlays(user._id, accessToken, 10);
 
-    await playService.syncRecentPlays(user._id, token.access_token, 10);
-
-    return reply.send({
+    return {
       message: 'Authentication successful',
-      accessToken: token.access_token,
-      user: {
-        spotifyId: user.spotifyId,
-        displayName: user.displayName,
-      },
-    });
+      accessToken,
+      user: { spotifyId: user.spotifyId, displayName: user.displayName },
+    };
   });
 
-  fastify.get('/', async (request, reply) => ({ hello: 'world' }));
+  fastify.get('/', async () => ({ hello: 'world' }));
 
   fastify.get(
     '/api/profile',
-    {
-      preHandler: fastify.authenticate,
-    },
-    async (request, reply) => {
-      const { spotifyId, displayName, createdAt } = request.user;
-      return { spotifyId, displayName, createdAt };
+    { preHandler: fastify.authenticate },
+    async (request) => {
+      return request.spotify.request('https://api.spotify.com/v1/me');
     },
   );
 
   fastify.get(
     '/api/history',
-    {
-      preHandler: fastify.authenticate,
-    },
-    async (request, reply) => {
-      fastify.log.info(
-        { userId: request.user._id },
-        'Entered /api/history handler',
+    { preHandler: fastify.authenticate },
+    async (request) => {
+      const data = await request.spotify.request(
+        'https://api.spotify.com/v1/me/player/recently-played?limit=10',
       );
-      const userId = request.user._id;
-      if (!userId) {
-        return reply
-          .status(400)
-          .send({ error: 'User ID not found in request' });
-      }
-      const history = await playService.getRecentPlays(userId, 10);
-      fastify.log.info(
-        { historyCount: history ? history.length : 0 },
-        'History fetched',
-      );
-      return { history };
+      return { history: data };
     },
   );
+
   fastify.get(
     '/api/game/simulate-round-with-timer/:artistId',
-    {
-      preHandler: fastify.authenticate,
-    },
+    { preHandler: fastify.authenticate },
     async (request, reply) => {
       const { artistId } = request.params;
-      const user = request.user;
-      if (!user || !user.accessToken) {
-        fastify.log.warn(
-          '[GameSim] User or accessToken not found after authentication.',
-        );
-        return reply.status(401).send({
-          error:
-            'User not authenticated or access token missing in user object',
-        });
+      const roundData = await gameService.getGameRoundData(
+        artistId,
+        request.user.accessToken,
+        fastify.log,
+      );
+      if (!roundData) {
+        reply.code(404);
+        return { error: 'No game data' };
       }
-
-      try {
-        fastify.log.info(
-          `[GameSim] Request to /api/game/simulate-round-with-timer for artistId: ${artistId}`,
-        );
-
-        const roundData = await gameService.getGameRoundData(
-          artistId,
-          user.accessToken,
-          fastify.log,
-        );
-
-        if (!roundData) {
-          fastify.log.warn(
-            `[GameSim] Could not generate game round for artist ${artistId}.`,
-          );
-          return reply.status(404).send({
-            error:
-              'Could not generate game round. Not enough tracks or artist not found.',
-          });
-        }
-
-        fastify.log.info(
-          `[GameSim] Round data prepared. Track to guess: ${roundData.trackToGuess.name} (URI: ${roundData.trackToGuess.uri}, Duration: ${roundData.trackToGuess.duration_ms}ms). Options: ${roundData.options.join(', ')}`,
-        );
-        fastify.log.info(
-          `[GameSim] Starting 5-second timer simulation using Task 1 functions...`,
-        );
-
-        const timerGenerator = gameService.incGenerator(0);
-        const gameDurationSeconds = 5;
-
-        const simulatedTickCallback = (tick) => {
-          const secondsElapsed = tick + 1;
-          const timeLeft = gameDurationSeconds - secondsElapsed;
-          fastify.log.info(
-            `[GameSim Timer] Tick: ${tick}, Time Elapsed: ${secondsElapsed}s, Time Left: ${timeLeft >= 0 ? timeLeft : 0}s`,
-          );
-          if (timeLeft <= 0) {
-            fastify.log.info(`[GameSim Timer] 5 seconds up! (Simulated)`);
-          }
-        };
-
-        gameService.iteratorWithTimeout(
-          timerGenerator,
-          gameDurationSeconds,
-          simulatedTickCallback,
-          1000,
-        );
-
-        return reply.send({
-          message: `Game round simulation started for artist ${artistId}. Check server logs for timer ticks.`,
-          trackToGuess: {
-            name: roundData.trackToGuess.name,
-            uri: roundData.trackToGuess.uri,
-            duration_ms: roundData.trackToGuess.duration_ms,
-          },
-          options: roundData.options,
-        });
-      } catch (error) {
-        fastify.log.error(
-          { err: error },
-          `[GameSim] Error in /api/game/simulate-round-with-timer: ${error.message}`,
-        );
-        if (
-          error.message &&
-          error.message.includes('Spotify API') &&
-          (error.message.includes('401') || error.message.includes('403'))
-        ) {
-          return reply.status(401).send({
-            error:
-              'Spotify token expired, invalid, or insufficient permissions. Please re-authenticate.',
-          });
-        }
-        return reply
-          .status(500)
-          .send({ error: 'Failed to simulate game round' });
-      }
+      gameService.iteratorWithTimeout(
+        gameService.incGenerator(0),
+        5,
+        (tick) => fastify.log.info(`Tick ${tick}`),
+        1000,
+      );
+      return {
+        trackToGuess: roundData.trackToGuess,
+        options: roundData.options,
+      };
     },
   );
 
-  const port = Number(fastify.config.PORT || 3000);
-  await fastify.listen({ port, host: '127.0.0.1' });
-  fastify.log.info(`Server running at http://127.0.0.1:${port}`);
+  await fastify.listen({
+    port: Number(fastify.config.PORT),
+    host: '127.0.0.1',
+  });
 }
 
 start().catch((err) => {
-  fastify.log.error({ err }, 'Failed to start server');
+  fastify.log.error(err);
   process.exit(1);
 });
