@@ -4,8 +4,11 @@ const { URLSearchParams } = require('url');
 const SpotifyProxy = require('../services/spotifyProxy');
 
 const spotifyProxyPlugin = async (fastify) => {
-  const clientId = fastify.config.SPOTIFY_CLIENT_ID;
-  const clientSecret = fastify.config.SPOTIFY_CLIENT_SECRET;
+  const {
+    SPOTIFY_CLIENT_ID: clientId,
+    SPOTIFY_CLIENT_SECRET: clientSecret,
+    APP_URL: appUrl,
+  } = fastify.config;
   const tokenUrl = 'https://accounts.spotify.com/api/token';
 
   const getClientTokenFn = async () => {
@@ -18,17 +21,15 @@ const spotifyProxyPlugin = async (fastify) => {
       body: new URLSearchParams({ grant_type: 'client_credentials' }),
     });
     if (!res.ok) {
-      let errText = '';
+      let text = '';
       try {
-        errText = await res.text();
-      } catch {
-        errText = '';
-      }
-      fastify.log.error(`Client token error ${res.status}: ${errText}`);
-      throw new Error('Failed to get client credentials token');
+        text = await res.text();
+      } catch {}
+      fastify.log.error(`Token fetch failed ${res.status}: ${text}`);
+      throw new Error('Failed to get client token');
     }
-    const data = await res.json();
-    return data.access_token;
+    const { access_token } = await res.json();
+    return access_token;
   };
 
   const getUserTokenFn = async (request) => {
@@ -47,8 +48,7 @@ const spotifyProxyPlugin = async (fastify) => {
   fastify.decorateRequest('spotify', null);
   fastify.addHook('onRequest', (request, reply, done) => {
     request.spotify = {
-      request: (url, opts = {}) =>
-        coreProxy.request(url, { ...opts, tokenType: 'user', request }),
+      request: (url, opts = {}) => coreProxy.request(url, { ...opts, request }),
     };
     done();
   });
