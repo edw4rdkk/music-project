@@ -1,4 +1,3 @@
-// services/spotifyProxy.js
 const fetch = require('node-fetch');
 
 class SpotifyProxy {
@@ -7,24 +6,18 @@ class SpotifyProxy {
     this._getUserToken = getUserTokenFn;
     this._fastify = fastify;
   }
+
   async request(
     url,
-    {
-      method = 'GET',
-      tokenType = 'user',
-      headers = {},
-      body = null,
-      request,
-      token,
-    } = {},
+    { method = 'GET', headers = {}, body = null, request, token } = {},
   ) {
     let accessToken;
     if (token) {
       accessToken = token;
-    } else if (tokenType === 'client') {
-      accessToken = await this._getClientToken();
-    } else {
+    } else if (request && request.user && request.user.accessToken) {
       accessToken = await this._getUserToken(request);
+    } else {
+      accessToken = await this._getClientToken();
     }
 
     const auth = { Authorization: `Bearer ${accessToken}` };
@@ -35,22 +28,24 @@ class SpotifyProxy {
       body,
     });
 
-    if (res.status === 401 || res.status === 403) {
+    if (
+      (res.status === 401 || res.status === 403) &&
+      (!request || !request.user)
+    ) {
       this._fastify.log.warn(`Auth failed (${res.status}), refreshing token`);
-      if (tokenType === 'client') {
-        const newToken = await this._getClientToken();
-        res = await fetch(url, {
-          method,
-          headers: { ...headers, Authorization: `Bearer ${newToken}` },
-          body,
-        });
-      } else {
-        throw new Error('User token expired or invalid');
-      }
+      const newToken = await this._getClientToken();
+      res = await fetch(url, {
+        method,
+        headers: { ...headers, Authorization: `Bearer ${newToken}` },
+        body,
+      });
     }
 
     if (!res.ok) {
-      const text = await res.text().catch(() => '');
+      let text = '';
+      try {
+        text = await res.text();
+      } catch {}
       this._fastify.log.error(`Error ${res.status}: ${text}`);
       throw new Error(`Spotify API error: ${res.status}`);
     }
